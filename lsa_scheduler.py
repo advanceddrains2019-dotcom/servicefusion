@@ -12,10 +12,11 @@ LSA_NAME = "LocalServicesCampaign:SystemGenerated:0005d4deb10e4ddf"
 
 def load_secrets():
     s = {}
-    for l in open("/root/.vikky_secrets"):
-        if "=" in l and not l.strip().startswith("#"):
-            k, v = l.split("=", 1)
-            s[k.strip()] = v.strip()
+    with open("/root/.vikky_secrets") as f:
+        for l in f:
+            if "=" in l and not l.strip().startswith("#"):
+                k, v = l.split("=", 1)
+                s[k.strip()] = v.strip()
     return s
 
 

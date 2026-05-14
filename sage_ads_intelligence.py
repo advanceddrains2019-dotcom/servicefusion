@@ -74,10 +74,13 @@ def get_campaigns(days):
         SELECT
             campaign.name,
             campaign.status,
+            campaign.advertising_channel_type,
             metrics.cost_micros,
             metrics.clicks,
             metrics.impressions,
-            metrics.conversions
+            metrics.conversions,
+            metrics.phone_calls,
+            metrics.phone_impressions
         FROM campaign
         WHERE {date_range}
     """
@@ -88,10 +91,13 @@ def get_campaigns(days):
         for row in batch.results:
             name = row.campaign.name
             status = row.campaign.status.name
+            channel_type = row.campaign.advertising_channel_type.name
             spend = row.metrics.cost_micros / 1_000_000
             clicks = row.metrics.clicks
             impressions = row.metrics.impressions
             conversions = row.metrics.conversions
+            phone_calls = row.metrics.phone_calls
+            phone_impressions = row.metrics.phone_impressions
 
             if name in results:
                 r = results[name]
@@ -99,14 +105,19 @@ def get_campaigns(days):
                 r["clicks"] += clicks
                 r["impressions"] += impressions
                 r["conversions"] += conversions
+                r["phone_calls"] += phone_calls
+                r["phone_impressions"] += phone_impressions
             else:
                 results[name] = {
                     "name": name,
                     "status": status,
+                    "channel_type": channel_type,
                     "spend": spend,
                     "clicks": clicks,
                     "impressions": impressions,
                     "conversions": conversions,
+                    "phone_calls": phone_calls,
+                    "phone_impressions": phone_impressions,
                 }
 
     return list(results.values())
@@ -124,26 +135,44 @@ def save_snapshot(campaigns):
             ts TEXT NOT NULL,
             name TEXT,
             status TEXT,
+            channel_type TEXT,
             spend REAL,
             clicks INTEGER,
             impressions INTEGER,
-            conversions REAL
+            conversions REAL,
+            phone_calls INTEGER,
+            phone_impressions INTEGER
         )
         """
     )
-    ts = datetime.datetime.utcnow().isoformat()
+    # Idempotently add columns to pre-existing snaps tables.
+    for col, decl in (
+        ("channel_type", "TEXT"),
+        ("phone_calls", "INTEGER"),
+        ("phone_impressions", "INTEGER"),
+    ):
+        try:
+            cur.execute(f"ALTER TABLE snaps ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
+
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
     for c in campaigns:
         cur.execute(
-            "INSERT INTO snaps (ts, name, status, spend, clicks, impressions, conversions) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO snaps (ts, name, status, channel_type, spend, clicks, "
+            "impressions, conversions, phone_calls, phone_impressions) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ts,
                 c.get("name"),
                 c.get("status"),
+                c.get("channel_type"),
                 float(c.get("spend", 0)),
                 int(c.get("clicks", 0)),
                 int(c.get("impressions", 0)),
                 float(c.get("conversions", 0)),
+                int(c.get("phone_calls", 0)),
+                int(c.get("phone_impressions", 0)),
             ),
         )
     conn.commit()
@@ -165,10 +194,15 @@ def slack_post(msg):
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.URLError as e:
         print(f"Slack post failed: {e}", file=sys.stderr)
         return {"ok": False, "error": str(e)}
+    if not result.get("ok"):
+        # Slack returned HTTP 200 but rejected the message (bad token, channel
+        # not found, archived, etc). Surface it so cron logs catch it.
+        print(f"Slack rejected post: {result.get('error', 'unknown')}", file=sys.stderr)
+    return result
 
 
 def ai_recommend(campaigns):
@@ -178,10 +212,15 @@ def ai_recommend(campaigns):
     summary_lines = []
     for c in campaigns:
         cpc = (c["spend"] / c["clicks"]) if c["clicks"] else 0
+        cost_per_call = (
+            (c["spend"] / c["phone_calls"]) if c.get("phone_calls") else 0
+        )
         summary_lines.append(
-            f"- {c['name']} [{c['status']}] spend=${c['spend']:.2f} "
-            f"clicks={c['clicks']} impressions={c['impressions']} "
-            f"conversions={c['conversions']:.1f} cpc=${cpc:.2f}"
+            f"- {c['name']} [{c['status']} / {c.get('channel_type', '?')}] "
+            f"spend=${c['spend']:.2f} clicks={c['clicks']} "
+            f"impressions={c['impressions']} conversions={c['conversions']:.1f} "
+            f"calls={c.get('phone_calls', 0)} cpc=${cpc:.2f} "
+            f"cost_per_call=${cost_per_call:.2f}"
         )
     summary = "\n".join(summary_lines) if summary_lines else "(no campaigns)"
 
@@ -231,10 +270,13 @@ def format_campaigns(campaigns):
     lines = []
     for c in sorted(campaigns, key=lambda x: x["spend"], reverse=True):
         cpc = (c["spend"] / c["clicks"]) if c["clicks"] else 0
+        calls = c.get("phone_calls", 0)
+        cost_per_call = (c["spend"] / calls) if calls else 0
         lines.append(
             f"• *{c['name']}* [{c['status']}] — spend ${c['spend']:.2f}, "
             f"clicks {c['clicks']}, impr {c['impressions']}, "
-            f"conv {c['conversions']:.1f}, CPC ${cpc:.2f}"
+            f"conv {c['conversions']:.1f}, calls {calls}, "
+            f"CPC ${cpc:.2f}, $/call ${cost_per_call:.2f}"
         )
     return "\n".join(lines)
 
@@ -245,6 +287,24 @@ def cmd_daily():
 
     alerts = []
     for c in campaigns:
+        # LSA campaigns generate calls/leads, not clicks. Evaluate them on
+        # phone_calls and cost-per-call so we don't fire false zero-click /
+        # high-CPC alerts every time the LSA campaign is running.
+        if c.get("channel_type") == "LOCAL_SERVICES":
+            if c["spend"] > 0 and c.get("phone_calls", 0) == 0:
+                alerts.append(
+                    f":warning: *{c['name']}* (LSA) spent ${c['spend']:.2f} "
+                    f"with *0 calls* (7d)"
+                )
+            elif c.get("phone_calls", 0) > 0:
+                cost_per_call = c["spend"] / c["phone_calls"]
+                if cost_per_call > 150:
+                    alerts.append(
+                        f":rotating_light: *{c['name']}* (LSA) cost/call is "
+                        f"*${cost_per_call:.2f}* (>$150, 7d)"
+                    )
+            continue
+
         if c["spend"] > 0 and c["clicks"] == 0:
             alerts.append(
                 f":warning: *{c['name']}* spent ${c['spend']:.2f} with *0 clicks* (7d)"
@@ -259,7 +319,7 @@ def cmd_daily():
     if alerts:
         msg = "*Daily Google Ads Alerts (7d)*\n" + "\n".join(alerts)
     else:
-        msg = "*Daily Google Ads Alerts (7d)*\n:white_check_mark: No zero-click or high-CPC issues detected."
+        msg = "*Daily Google Ads Alerts (7d)*\n:white_check_mark: No zero-click, zero-call, or high-CPC issues detected."
 
     slack_post(msg)
 
