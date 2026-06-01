@@ -11,54 +11,17 @@ import urllib.error
 
 from google.ads.googleads.client import GoogleAdsClient
 
+from ads_config import CUSTOMER_ID, build_ads_client_config, get_secret
 
-CUSTOMER_ID = "5177347535"
-MANAGER_ID = "3087463043"
-DEV_TOKEN = "T6gwQMFjkJyV1-KT1hOFxg"
-
-SECRETS_PATH = "/root/.vikky_secrets"
 DB_PATH = "/root/data/ads_history.db"
 SLACK_CHANNEL = "C0ARR7Q0QMN"
 NIM_ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions"
 NIM_MODEL = "moonshotai/kimi-k2-instruct"
 
 
-def load_secrets(path=SECRETS_PATH):
-    """Parse a simple key=value file into a dict."""
-    secrets = {}
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            secrets[k.strip()] = v.strip().strip('"').strip("'")
-    return secrets
-
-
-SECRETS = {}
-
-
-def get_secret(key):
-    global SECRETS
-    if not SECRETS:
-        SECRETS = load_secrets()
-    return SECRETS.get(key, "")
-
-
 def build_ads_client():
     """Build a GoogleAdsClient from secrets + constants."""
-    cfg = {
-        "developer_token": DEV_TOKEN,
-        "client_id": get_secret("GOOGLE_ADS_CLIENT_ID"),
-        "client_secret": get_secret("GOOGLE_ADS_CLIENT_SECRET"),
-        "refresh_token": get_secret("GOOGLE_ADS_REFRESH_TOKEN"),
-        "login_customer_id": MANAGER_ID,
-        "use_proto_plus": True,
-    }
-    return GoogleAdsClient.load_from_dict(cfg)
+    return GoogleAdsClient.load_from_dict(build_ads_client_config())
 
 
 def get_campaigns(days):
@@ -131,7 +94,7 @@ def save_snapshot(campaigns):
         )
         """
     )
-    ts = datetime.datetime.utcnow().isoformat()
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
     for c in campaigns:
         cur.execute(
             "INSERT INTO snaps (ts, name, status, spend, clicks, impressions, conversions) "

@@ -4,39 +4,22 @@
 import sys
 from google.ads.googleads.client import GoogleAdsClient
 
-CUSTOMER_ID = "5177347535"
-MANAGER_ID = "3087463043"
-DEV_TOKEN = "T6gwQMFjkJyV1-KT1hOFxg"
+from ads_config import CUSTOMER_ID, build_ads_client_config
+
 LSA_NAME = "LocalServicesCampaign:SystemGenerated:0005d4deb10e4ddf"
 
 
-def load_secrets():
-    s = {}
-    for l in open("/root/.vikky_secrets"):
-        if "=" in l and not l.strip().startswith("#"):
-            k, v = l.split("=", 1)
-            s[k.strip()] = v.strip()
-    return s
-
-
 def get_client():
-    s = load_secrets()
-    return GoogleAdsClient.load_from_dict({
-        "developer_token": DEV_TOKEN,
-        "client_id": s["GOOGLE_ADS_CLIENT_ID"],
-        "client_secret": s["GOOGLE_ADS_CLIENT_SECRET"],
-        "refresh_token": s["GOOGLE_ADS_REFRESH_TOKEN"],
-        "login_customer_id": MANAGER_ID,
-        "use_proto_plus": True,
-    })
+    return GoogleAdsClient.load_from_dict(build_ads_client_config())
 
 
 def find_lsa_campaign(client):
     ga = client.get_service("GoogleAdsService")
+    safe_name = LSA_NAME.replace("\\", "\\\\").replace("'", "\\'")
     query = (
         "SELECT campaign.id, campaign.name, campaign.status "
         "FROM campaign "
-        "WHERE campaign.name = '" + LSA_NAME + "'"
+        f"WHERE campaign.name = '{safe_name}'"
     )
     rows = list(ga.search(customer_id=CUSTOMER_ID, query=query))
     if not rows:
